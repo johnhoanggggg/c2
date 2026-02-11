@@ -1,0 +1,14 @@
+# 1. Ignore everything
+*
+
+# 2. But do not ignore directories (needed to reach nested files)
+!*/
+
+# 3. Do not ignore Python scripts
+!*.py
+
+# 4. Do not ignore this file itself
+!.gitignore
+
+# 5. Optional: Do not ignore documentation
+!README.md
