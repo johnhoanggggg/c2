@@ -48,7 +48,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def extract_layer(src_path: str, layer_name: str) -> Optional[ezdxf.document.Drawing]:
-    """Read a DXF file and return a new document containing only entities on the
+    """Read a DXF file and return a filtered document containing only entities on the
     specified layer. Returns None if the file can't be read or the layer is empty."""
     try:
         doc = ezdxf.readfile(src_path)
@@ -61,35 +61,17 @@ def extract_layer(src_path: str, layer_name: str) -> Optional[ezdxf.document.Dra
         print(f"  Layer '{layer_name}' not found. Available: {', '.join(layers)}")
         return None
 
-    # Build a new doc with only the target layer's entities
-    new_doc = ezdxf.new(dxfversion="R2007")
-    new_msp = new_doc.modelspace()
-
-    # Copy the layer definition
-    src_layer = doc.layers.get(layer_name)
-    try:
-        new_doc.layers.add(layer_name,
-                           color=src_layer.dxf.color,
-                           linetype=src_layer.dxf.linetype)
-    except Exception:
-        new_doc.layers.add(layer_name)
-
-    # Copy header extents so the render scales correctly
-    for var in ("$EXTMIN", "$EXTMAX", "$LIMMIN", "$LIMMAX", "$INSUNITS",
-                "$LUNITS", "$MEASUREMENT"):
-        try:
-            new_doc.header[var] = doc.header[var]
-        except (ezdxf.DXFKeyError, KeyError):
-            pass
-
-    # Copy entities from the target layer
+    # Keep the original document tables/styles/fonts and only filter modelspace
+    # entities. This preserves CAD style context better than rebuilding a new doc.
     msp = doc.modelspace()
     count = 0
+    to_delete = []
     for entity in msp:
         try:
             if entity.dxf.layer == layer_name:
-                new_msp.add_foreign_entity(entity.copy())
                 count += 1
+            else:
+                to_delete.append(entity)
         except Exception:
             pass
 
@@ -97,8 +79,14 @@ def extract_layer(src_path: str, layer_name: str) -> Optional[ezdxf.document.Dra
         print(f"  Layer '{layer_name}' exists but has 0 entities")
         return None
 
+    for entity in to_delete:
+        try:
+            msp.delete_entity(entity)
+        except Exception:
+            pass
+
     print(f"  Extracted {count} entities from layer '{layer_name}'")
-    return new_doc
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -159,19 +147,53 @@ def pixel_to_dxf_coords(px_x, px_y, tinfo):
 # OCR (wires-style: --psm 11, digits, multi-rotation)
 # ---------------------------------------------------------------------------
 
+def preprocess_for_ocr(img: Image.Image, binarize: bool = True) -> Image.Image:
+    """Preprocess image before OCR. Uses Otsu binarization when enabled."""
+    gray = np.array(img.convert("L"))
+    if not binarize:
+        return Image.fromarray(gray, mode="L").convert("RGB")
+
+    hist, _ = np.histogram(gray.ravel(), bins=256, range=(0, 256))
+    total = gray.size
+    sum_total = float(np.dot(np.arange(256), hist))
+    sum_bg = 0.0
+    w_bg = 0.0
+    best_var = -1.0
+    threshold = 127
+    for t in range(256):
+        w_bg += hist[t]
+        if w_bg == 0:
+            continue
+        w_fg = total - w_bg
+        if w_fg == 0:
+            break
+        sum_bg += t * hist[t]
+        m_bg = sum_bg / w_bg
+        m_fg = (sum_total - sum_bg) / w_fg
+        var_between = w_bg * w_fg * (m_bg - m_fg) ** 2
+        if var_between > best_var:
+            best_var = var_between
+            threshold = t
+
+    bw = (gray > threshold).astype(np.uint8) * 255
+    return Image.fromarray(bw, mode="L").convert("RGB")
+
+
 def perform_ocr(img: Image.Image, tinfo: Dict, dpi: int = 600,
-                min_confidence: int = 20) -> List[Dict]:
+                min_confidence: int = 20, binarize: bool = True) -> List[Dict]:
     """Run OCR at multiple rotations using the wires pipeline approach.
     Returns list of dicts: text, dxf_x, dxf_y, px_x, px_y, confidence, rotation, width, height."""
 
     # Wires-style config: sparse text, digits only
-    config = '--psm 11 -c tessedit_char_whitelist=0123456789'
+    config = '--psm 11 -c tessedit_char_whitelist=+ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 '
 
+    ocr_img = preprocess_for_ocr(img, binarize=binarize)
     all_items = []
-    rotations = [(0, "0deg"), (90, "90deg CCW"), (270, "270deg CCW")]
+    rotations = [(0, "0deg")]
 
     for angle, desc in rotations:
-        rotated = img if angle == 0 else img.rotate(angle, expand=True)
+        rotated = ocr_img if angle == 0 else ocr_img.rotate(angle, expand=True)
+        print(f"    OCR input [{desc}]: {rotated.width}x{rotated.height} px (render_dpi={dpi})")
         ocr_data = pytesseract.image_to_data(
             rotated, config=config, output_type=pytesseract.Output.DICT
         )
@@ -190,7 +212,7 @@ def perform_ocr(img: Image.Image, tinfo: Dict, dpi: int = 600,
             h = ocr_data['height'][i]
 
             # Map rotated pixel coords back to original image coords
-            orig_w, orig_h = img.width, img.height
+            orig_w, orig_h = ocr_img.width, ocr_img.height
             if angle == 0:
                 opx, opy = cx, cy
             elif angle == 90:
@@ -235,34 +257,25 @@ def perform_ocr(img: Image.Image, tinfo: Dict, dpi: int = 600,
 
 
 # ---------------------------------------------------------------------------
-# Also extract the full-page rendering (all layers) for background display
-# ---------------------------------------------------------------------------
-
-def render_full_dxf(src_path: str, dpi: int = 300) -> Optional[Image.Image]:
-    """Render the full DXF (all layers) at lower DPI as background context."""
-    try:
-        doc = ezdxf.readfile(src_path)
-    except Exception:
-        return None
-    img, _ = render_dxf_to_image(doc, dpi=dpi)
-    return img
-
-
-# ---------------------------------------------------------------------------
 # Interactive viewer
 # ---------------------------------------------------------------------------
 
 class OCRDebugViewer:
     """Interactive matplotlib viewer that overlays OCR results on the DXF page."""
 
-    def __init__(self, dxf_files: List[Path], layer: str, dpi: int, min_conf: int):
+    def __init__(self, dxf_files: List[Path], layer: str, dpi: int, min_conf: int,
+                 display_dpi: int, anno_scale: float, binarize: bool):
         self.dxf_files = dxf_files
         self.layer = layer
         self.dpi = dpi
         self.min_conf = min_conf
+        self.display_dpi = display_dpi
+        self.anno_scale = anno_scale
+        self.binarize = binarize
         self.idx = 0
         self.show_text = True
         self.show_confidence_color = True
+        self.show_ocr_input = False
 
         # Cache for processed results
         self.cache: Dict[int, dict] = {}
@@ -282,8 +295,8 @@ class OCRDebugViewer:
 
         result = {
             'path': path,
-            'full_img': None,
             'layer_img': None,
+            'ocr_input_img': None,
             'tinfo': None,
             'ocr_items': [],
             'error': None,
@@ -293,8 +306,6 @@ class OCRDebugViewer:
         layer_doc = extract_layer(str(path), self.layer)
         if layer_doc is None:
             result['error'] = f"Could not extract layer '{self.layer}'"
-            # Still try to render full DXF as background
-            result['full_img'] = render_full_dxf(str(path), dpi=150)
             self.cache[idx] = result
             return result
 
@@ -302,17 +313,14 @@ class OCRDebugViewer:
         print(f"  Rendering layer '{self.layer}' at {self.dpi} DPI for OCR...")
         layer_img, tinfo = render_dxf_to_image(layer_doc, dpi=self.dpi)
         result['layer_img'] = layer_img
+        result['ocr_input_img'] = preprocess_for_ocr(layer_img, binarize=self.binarize) if layer_img else None
         result['tinfo'] = tinfo
-
-        # Render full DXF at moderate DPI for display background
-        print(f"  Rendering full page (all layers) for background...")
-        result['full_img'] = render_full_dxf(str(path), dpi=150)
 
         # Perform OCR
         if layer_img is not None and tinfo is not None:
             print(f"  Running OCR (wires-style, psm=11, digits, {self.dpi} DPI)...")
             result['ocr_items'] = perform_ocr(
-                layer_img, tinfo, dpi=self.dpi, min_confidence=self.min_conf
+                layer_img, tinfo, dpi=self.dpi, min_confidence=self.min_conf, binarize=self.binarize
             )
             print(f"  Found {len(result['ocr_items'])} OCR detections")
 
@@ -349,24 +357,20 @@ class OCRDebugViewer:
             status += f"  |  Layer '{self.layer}'  |  {n} OCR detections  |  min_conf={self.min_conf}"
         self.ax_main.set_title(status, fontsize=10, fontfamily='monospace')
 
-        # Show full DXF as background
-        if result['full_img'] is not None:
-            self.ax_main.imshow(np.array(result['full_img']), aspect='equal', alpha=0.4)
-
-        # Overlay the layer image
-        if result['layer_img'] is not None:
-            # Resize layer image to match the full image display if both exist
-            layer_arr = np.array(result['layer_img'])
-            if result['full_img'] is not None:
-                full_arr = np.array(result['full_img'])
-                # Resize layer to full img dims for overlay alignment
-                from PIL import Image as PILImage
-                layer_resized = result['layer_img'].resize(
-                    (full_arr.shape[1], full_arr.shape[0]),
-                    PILImage.LANCZOS
-                )
-                layer_arr = np.array(layer_resized)
-            self.ax_main.imshow(layer_arr, aspect='equal', alpha=0.6)
+        if self.show_ocr_input and result['layer_img'] is not None:
+            # Show the exact image passed to Tesseract (0deg pass), unscaled.
+            ocr_input = result['ocr_input_img'] if result['ocr_input_img'] is not None else result['layer_img']
+            layer_arr = np.array(ocr_input)
+            self.ax_main.imshow(layer_arr, aspect='equal', alpha=1.0)
+            status += (f"  |  OCR INPUT VIEW: {ocr_input.width}x"
+                       f"{ocr_input.height}px @ {self.dpi} DPI"
+                       f"  |  binarize={'ON' if self.binarize else 'OFF'}")
+            self.ax_main.set_title(status, fontsize=10, fontfamily='monospace')
+        else:
+            # Show only the selected layer.
+            if result['layer_img'] is not None:
+                layer_arr = np.array(result['layer_img'])
+                self.ax_main.imshow(layer_arr, aspect='equal', alpha=1.0)
 
         # Overlay OCR results
         if result['ocr_items'] and result['layer_img'] is not None:
@@ -374,13 +378,17 @@ class OCRDebugViewer:
             img_w = result['layer_img'].width
             img_h = result['layer_img'].height
 
-            # If we resized for display, compute scale factors
-            if result['full_img'] is not None:
-                full_arr = np.array(result['full_img'])
-                sx = full_arr.shape[1] / img_w
-                sy = full_arr.shape[0] / img_h
-            else:
-                sx, sy = 1.0, 1.0
+            # No cross-image resize: OCR coordinates are in the same pixel space as layer_img.
+            sx, sy = 1.0, 1.0
+
+            # Keep overlays readable at high OCR DPI; user multiplier can tune it.
+            dpi_scale = max(0.2, min(1.0, 300.0 / max(1, self.dpi)))
+            geom_scale = max(0.15, min(1.0, min(sx, sy)))
+            anno_scale = max(0.05, self.anno_scale * dpi_scale * geom_scale)
+            line_w = max(0.5, 1.3 * anno_scale)
+            font_sz = max(4.0, 8.0 * anno_scale)
+            y_offset = max(2.0, 4.0 * anno_scale)
+            pad = max(0.02, 0.10 * anno_scale)
 
             for item in result['ocr_items']:
                 if item['confidence'] < self.min_conf:
@@ -396,7 +404,7 @@ class OCRDebugViewer:
                 # Bounding box
                 rect = patches.Rectangle(
                     (px - hw, py - hh), hw * 2, hh * 2,
-                    linewidth=1.5, edgecolor=color, facecolor='none', alpha=0.8
+                    linewidth=line_w, edgecolor=color, facecolor='none', alpha=0.8
                 )
                 self.ax_main.add_patch(rect)
 
@@ -405,10 +413,10 @@ class OCRDebugViewer:
                     rot_label = f" @{item['rotation']}d" if item['rotation'] != 0 else ""
                     label = f"{item['text']} ({item['confidence']}%{rot_label})"
                     self.ax_main.text(
-                        px - hw, py - hh - 4, label,
-                        fontsize=7, color='white', fontfamily='monospace',
+                        px - hw, py - hh - y_offset, label,
+                        fontsize=font_sz, color='white', fontfamily='monospace',
                         bbox=dict(facecolor=color, alpha=0.75, edgecolor='none',
-                                  boxstyle='round,pad=0.15'),
+                                  boxstyle=f'round,pad={pad}'),
                         verticalalignment='bottom',
                     )
 
@@ -417,7 +425,7 @@ class OCRDebugViewer:
         # Legend
         legend_text = (
             "Nav: Left/Right or N/P  |  Q: Quit  |  "
-            "T: Toggle text  |  C: Toggle color  |  +/-: Confidence threshold"
+            "T: Toggle text  |  C: Toggle color  |  I: OCR input view  |  [ ]: Label size  |  +/-: Confidence threshold"
         )
         self.fig.text(0.5, 0.01, legend_text, ha='center', fontsize=8,
                       fontfamily='monospace', color='gray')
@@ -441,6 +449,19 @@ class OCRDebugViewer:
         elif event.key == 'c':
             self.show_confidence_color = not self.show_confidence_color
             self.draw()
+        elif event.key == 'i':
+            self.show_ocr_input = not self.show_ocr_input
+            mode = "ON" if self.show_ocr_input else "OFF"
+            print(f"  OCR input view: {mode}")
+            self.draw()
+        elif event.key == ']':
+            self.anno_scale = min(4.0, self.anno_scale * 1.2)
+            print(f"  Annotation scale: {self.anno_scale:.2f}")
+            self.draw()
+        elif event.key == '[':
+            self.anno_scale = max(0.05, self.anno_scale / 1.2)
+            print(f"  Annotation scale: {self.anno_scale:.2f}")
+            self.draw()
         elif event.key == '+' or event.key == '=':
             self.min_conf = min(95, self.min_conf + 5)
             print(f"  Min confidence: {self.min_conf}")
@@ -451,7 +472,7 @@ class OCRDebugViewer:
             self.draw()
 
     def run(self):
-        self.fig = plt.figure(figsize=(18, 12), dpi=100)
+        self.fig = plt.figure(figsize=(18, 12), dpi=self.display_dpi)
         self.ax_main = self.fig.add_axes([0.02, 0.04, 0.96, 0.92])
         self.fig.canvas.mpl_connect('key_press_event', self.on_key)
         self.draw()
@@ -471,10 +492,16 @@ def main():
     parser.add_argument("input", help="DXF file or folder of DXF files")
     parser.add_argument("--layer", default="4",
                         help="Layer name to extract (default: 4)")
-    parser.add_argument("--dpi", type=int, default=600,
-                        help="DPI for OCR rendering (default: 600)")
+    parser.add_argument("--dpi", type=int, default=1200,
+                        help="DPI for OCR rendering (default: 300)")
     parser.add_argument("--min-conf", type=int, default=20,
                         help="Minimum OCR confidence threshold (default: 20)")
+    parser.add_argument("--display-dpi", type=int, default=600,
+                        help="Display DPI for the viewer canvas (default: 600)")
+    parser.add_argument("--anno-scale", type=float, default=1.0,
+                        help="Overlay annotation size multiplier (default: 1.0; lower = smaller labels)")
+    parser.add_argument("--no-binarize", action="store_true",
+                        help="Disable OCR binarization preprocessing (enabled by default)")
     args = parser.parse_args()
 
     source = Path(args.input)
@@ -490,7 +517,10 @@ def main():
         print(f"Path not found: {source}")
         sys.exit(1)
 
-    viewer = OCRDebugViewer(dxf_files, args.layer, args.dpi, args.min_conf)
+    viewer = OCRDebugViewer(
+        dxf_files, args.layer, args.dpi, args.min_conf, args.display_dpi, args.anno_scale,
+        binarize=not args.no_binarize
+    )
     viewer.run()
 
 
