@@ -993,8 +993,8 @@ class ExcelExporter:
             sym_y_in = page_h_in - (s.center[1] / zoom / PTS_PER_INCH)
 
             ws.cell(row=row, column=1, value=symbol_macro_name)
-            ws.cell(row=row, column=2, value=round(sym_x_in, 4))
-            ws.cell(row=row, column=3, value=round(sym_y_in, 4))
+            ws.cell(row=row, column=2, value=round(sym_x_in, 2))
+            ws.cell(row=row, column=3, value=round(sym_y_in, 2))
             ws.cell(row=row, column=6, value=s.page_num)
             ws.cell(row=row, column=11, value=fmt(s.location))
             
@@ -1026,8 +1026,8 @@ class ExcelExporter:
                 term_y_in = page_h_in - (ty_px / zoom / PTS_PER_INCH)
                 
                 ws.cell(row=row, column=1, value=macro_name)
-                ws.cell(row=row, column=2, value=round(term_x_in, 4))
-                ws.cell(row=row, column=3, value=round(term_y_in, 4))
+                ws.cell(row=row, column=2, value=round(term_x_in, 2))
+                ws.cell(row=row, column=3, value=round(term_y_in, 2))
                 ws.cell(row=row, column=6, value=s.page_num)
                 ws.cell(row=row, column=11, value="\u00A0")
                 ws.cell(row=row, column=13, value="\u00A0")
@@ -1052,8 +1052,8 @@ class ExcelExporter:
                 parent_y_in = page_h_in - (py_px / zoom / PTS_PER_INCH)
 
                 ws.cell(row=row, column=1, value=macro_name)
-                ws.cell(row=row, column=2, value=round(parent_x_in, 4))
-                ws.cell(row=row, column=3, value=round(parent_y_in, 4))
+                ws.cell(row=row, column=2, value=round(parent_x_in, 2))
+                ws.cell(row=row, column=3, value=round(parent_y_in, 2))
                 ws.cell(row=row, column=6, value=s.page_num)
                 ws.cell(row=row, column=11, value="\u00A0")
                 ws.cell(row=row, column=13, value="\u00A0")
@@ -1099,7 +1099,7 @@ def main():
 
         DetectionConfig(
             template_path="symbols/fuse.png",
-            export_macro="fuse",
+            export_macro="c2_fuse",
             threshold=0.7,
             search_radius=250,
             overlap_threshold=0.2,

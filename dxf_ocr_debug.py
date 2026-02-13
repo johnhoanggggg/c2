@@ -185,7 +185,7 @@ def perform_ocr(img: Image.Image, tinfo: Dict, dpi: int = 600,
     Returns list of dicts: text, dxf_x, dxf_y, px_x, px_y, confidence, rotation, width, height."""
 
     # Wires-style config: sparse text, digits only
-    config = '--psm 11 -c tessedit_char_whitelist=+ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 '
+    config = '--psm 11 -c tessedit_char_whitelist=+.ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 '
 
     ocr_img = preprocess_for_ocr(img, binarize=binarize)
     all_items = []
