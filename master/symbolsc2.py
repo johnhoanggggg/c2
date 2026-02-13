@@ -49,8 +49,8 @@ class DetectionConfig:
     function_regex: Optional[str] = None
     mark_regex: Optional[str] = None
     location_regex: Optional[str] = r"^\+[A-Z].*"
-    terminal_number_regex: Optional[str] = r"^\d{1,2}$"
-    terminal_child_regex: Optional[str] = r"^\d{1,2}([A-Za-z])?$"
+    terminal_number_regex: Optional[str] = r"^\d+\.?\d*\s?[AWaw]$"
+    terminal_child_regex: Optional[str] = None
 
     _re_function: Optional[Pattern] = field(init=False, default=None)
     _re_mark: Optional[Pattern] = field(init=False, default=None)
@@ -385,6 +385,8 @@ class TextService:
 
         for sym_idx in indices:
             sym, cfg = symbols_with_cfg[sym_idx]
+            if not cfg._re_term_num:
+                continue
             cx, cy = sym.center
             radius = cfg.search_radius
             nearby_words = spatial_index.query_nearby(sym.center, radius)
@@ -396,123 +398,23 @@ class TextService:
                 if dist > radius:
                     continue
 
-                if cfg._re_term_num and cfg._re_term_num.match(w.text):
+                if cfg._re_term_num.match(w.text):
                     candidates.append({
                         'dist': dist, 'w_idx': w_idx, 's_idx': sym_idx,
-                        'text': w.text, 'type': 'terminal',
-                        'coord': (int(wx_raw), int(wy_raw)),
-                        'angle': w.angle
-                    })
-                elif cfg._re_term_child and cfg._re_term_child.match(w.text):
-                    candidates.append({
-                        'dist': dist, 'w_idx': w_idx, 's_idx': sym_idx,
-                        'text': w.text, 'type': 'parent',
-                        'coord': (int(wx_raw), int(wy_raw)),
-                        'angle': w.angle
+                        'text': w.text,
                     })
 
         candidates.sort(key=lambda x: x['dist'])
         used_word_indices = set()
-        sym_terminals = {i: [] for i in indices}
 
         for c in candidates:
             if c['w_idx'] in used_word_indices:
                 continue
+            sym_data, cfg = symbols_with_cfg[c['s_idx']]
+            if sym_data.terminal_parent != "\u00A0":
+                continue
             used_word_indices.add(c['w_idx'])
-            sym_idx = c['s_idx']
-            sym_data, cfg = symbols_with_cfg[sym_idx]
-
-            if c['type'] == 'parent':
-                if sym_data.terminal_parent == "\u00A0":
-                    sym_data.terminal_parent = c['text']
-                    sym_data.terminal_parent_point = c['coord']
-                    sym_data.terminal_parent_angle = int(c['angle'])
-            else:
-                wx, wy = c['coord']
-                calc_x = wx - 5 if cfg.num_terminals == 4 else wx
-
-                cx, cy = sym_data.center
-                angle = math.degrees(math.atan2(-(wy - cy), calc_x - cx)) % 360
-                sym_terminals.setdefault(sym_idx, []).append(
-                    (c['text'], angle, c['dist'], c['coord'], c['angle'])
-                )
-
-        for sym_idx, terminals in sym_terminals.items():
-            sym_data, cfg = symbols_with_cfg[sym_idx]
-            if not terminals:
-                continue
-
-            terminals.sort(key=lambda x: x[2])
-            if len(terminals) > cfg.num_terminals:
-                terminals = terminals[:cfg.num_terminals]
-
-            targets = {}
-            rot = sym_data.rotation
-            if cfg.num_terminals == 1:
-                t = terminals[0]
-                sym_data.terminals_found[t[0]] = "up"
-                sym_data.terminals_exact_coords[t[0]] = (t[3][0], t[3][1], int(t[4]))
-                continue
-            elif cfg.num_terminals == 2:
-                if rot in [90, 270]:
-                    targets = {180: 'left', 0: 'right'}
-                else:
-                    targets = {90: 'up', 270: 'down'}
-            elif cfg.num_terminals == 4:
-                targets = {0: 'right', 90: 'up', 180: 'left', 270: 'down'}
-
-            matches = []
-            options_count = {t[0]: 0 for t in terminals}
-
-            for t_text, t_ang, _, t_coord, t_text_angle in terminals:
-                for slot_ang, slot_label in targets.items():
-                    diff = min(abs(t_ang - slot_ang), 360 - abs(t_ang - slot_ang))
-                    if diff <= 45:
-                        matches.append({
-                            'diff': diff, 'text': t_text, 'slot': slot_label,
-                            'coord': t_coord, 'angle': t_text_angle
-                        })
-                        options_count[t_text] += 1
-
-            matches.sort(key=lambda x: (options_count[x['text']], x['diff']))
-
-            used_terminals = set()
-            filled_slots = set()
-
-            for m in matches:
-                if m['text'] in used_terminals or m['slot'] in filled_slots:
-                    continue
-                sym_data.terminals_found[m['text']] = m['slot']
-                sym_data.terminals_exact_coords[m['text']] = (
-                    m['coord'][0], m['coord'][1], int(m['angle'])
-                )
-                used_terminals.add(m['text'])
-                filled_slots.add(m['slot'])
-
-            remaining_terms = [t for t in terminals if t[0] not in used_terminals]
-            remaining_slots = {ang: lbl for ang, lbl in targets.items() if lbl not in filled_slots}
-
-            if remaining_terms and remaining_slots:
-                force_matches = []
-                for t_text, t_ang, _, t_coord, t_text_angle in remaining_terms:
-                    for slot_ang, slot_label in remaining_slots.items():
-                        diff = min(abs(t_ang - slot_ang), 360 - abs(t_ang - slot_ang))
-                        force_matches.append({
-                            'diff': diff, 'text': t_text, 'slot': slot_label,
-                            'coord': t_coord, 'angle': t_text_angle
-                        })
-
-                force_matches.sort(key=lambda x: x['diff'])
-
-                for m in force_matches:
-                    if m['text'] in used_terminals or m['slot'] in filled_slots:
-                        continue
-                    sym_data.terminals_found[m['text']] = m['slot']
-                    sym_data.terminals_exact_coords[m['text']] = (
-                        m['coord'][0], m['coord'][1], int(m['angle'])
-                    )
-                    used_terminals.add(m['text'])
-                    filled_slots.add(m['slot'])
+            sym_data.terminal_parent = c['text']
 
 class HeuristicsService:
     @staticmethod
@@ -1004,62 +906,12 @@ class ExcelExporter:
             
             ws.cell(row=row, column=13, value=fmt(raw_function))
             ws.cell(row=row, column=23, value=fmt(s.mark))
-            ws.cell(row=row, column=24, value="\u00A0") 
-            ws.cell(row=row, column=25, value="\u00A0") 
-            ws.cell(row=row, column=26, value="\u00A0") 
-            ws.cell(row=row, column=27, value="\u00A0") 
-            ws.cell(row=row, column=28, value="\u00A0") 
+            ws.cell(row=row, column=24, value=fmt(s.terminal_parent))
+            ws.cell(row=row, column=25, value="\u00A0")
+            ws.cell(row=row, column=26, value="\u00A0")
+            ws.cell(row=row, column=27, value="\u00A0")
+            ws.cell(row=row, column=28, value="\u00A0")
             row += 1
-
-            # Child Terminals
-            for term_text, (tx_px, ty_px, raw_angle) in s.terminals_exact_coords.items():
-                raw_angle = raw_angle % 360
-                rotation = int(round(raw_angle / 90) * 90) % 360
-                if rotation == 270: suffix = "90"
-                elif rotation == 90: suffix = "270"
-                else: suffix = str(rotation)
-                
-                macro_name = f"text_{suffix}"
-
-                # Convert pixel coords → inches
-                term_x_in = tx_px / zoom / PTS_PER_INCH
-                term_y_in = page_h_in - (ty_px / zoom / PTS_PER_INCH)
-                
-                ws.cell(row=row, column=1, value=macro_name)
-                ws.cell(row=row, column=2, value=round(term_x_in, 4))
-                ws.cell(row=row, column=3, value=round(term_y_in, 4))
-                ws.cell(row=row, column=6, value=s.page_num)
-                ws.cell(row=row, column=11, value="\u00A0")
-                ws.cell(row=row, column=13, value="\u00A0")
-                ws.cell(row=row, column=23, value="\u00A0")
-                ws.cell(row=row, column=24, value=fmt(term_text))
-                row += 1
-
-            # Parent Terminal
-            if s.terminal_parent and s.terminal_parent.strip() and s.terminal_parent != "\u00A0" and s.terminal_parent_point:
-                px_px, py_px = s.terminal_parent_point
-                raw_angle = s.terminal_parent_angle
-                raw_angle = raw_angle % 360
-                rotation = int(round(raw_angle / 90) * 90) % 360
-                if rotation == 270: suffix = "90"
-                elif rotation == 90: suffix = "270"
-                else: suffix = str(rotation)
-
-                macro_name = f"text_{suffix}"
-
-                # Convert pixel coords → inches
-                parent_x_in = px_px / zoom / PTS_PER_INCH
-                parent_y_in = page_h_in - (py_px / zoom / PTS_PER_INCH)
-
-                ws.cell(row=row, column=1, value=macro_name)
-                ws.cell(row=row, column=2, value=round(parent_x_in, 4))
-                ws.cell(row=row, column=3, value=round(parent_y_in, 4))
-                ws.cell(row=row, column=6, value=s.page_num)
-                ws.cell(row=row, column=11, value="\u00A0")
-                ws.cell(row=row, column=13, value="\u00A0")
-                ws.cell(row=row, column=23, value="\u00A0")
-                ws.cell(row=row, column=24, value=fmt(s.terminal_parent))
-                row += 1
 
         wb.save(self.output_path)
         print(f"Saved to {self.output_path} (coordinates in inches)")
@@ -1109,7 +961,7 @@ def main():
             function_regex=None,
             mark_regex=r"^(\d{2}[F]\d+).*$",
             location_regex=r"^[+4]\s*([A-Z]{3}).*$",
-            terminal_number_regex=r"^([a-zA-Z]?\d{1,2}[a-zA-Z]?|[a-zA-Z]\d{1,2}[+-]?)$",
+            terminal_number_regex=r"^\d+\.?\d*\s?[AWaw]$",
             terminal_child_regex=None,
             use_mask= False,
         ),
